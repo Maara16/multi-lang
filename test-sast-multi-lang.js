@@ -52,13 +52,22 @@ async function runTests() {
     console.log(`  Info: ${results.summary.infoCount}`);
     console.log(`  Categories: ${results.summary.categoriesFound.join(', ')}`);
 
-    // Group findings by language
+    // Track false positives (findings in secure files)
+    const secureFilePattern = /secure\.(js|ts|py|java|cs|php|go|rb|cpp|rs|kt|swift)$/i;
+    const vulnerableFilePattern = /vulnerable\d*\.(js|ts|py|java|cs|php|go|rb|cpp|rs|kt|swift)$/i;
+    
+    const truePositives = []; // Findings in vulnerable files (correct)
+    const falsePositives = []; // Findings in secure files (incorrect)
+    const unknownFiles = []; // Findings in files we can't classify
+
+    // Group findings by language and classify as true/false positives
     const findingsByLanguage = {};
     const findingsByCategory = {};
 
     results.findings.forEach((finding) => {
       // Extract language from file path
       const filePath = finding.filePath;
+      const fileName = path.basename(filePath);
       let language = 'unknown';
       
       if (filePath.includes('/javascript/') || filePath.includes('/typescript/')) {
@@ -85,18 +94,81 @@ async function runTests() {
         language = 'swift';
       }
 
-      if (!findingsByLanguage[language]) {
-        findingsByLanguage[language] = [];
+      // Classify as true positive or false positive
+      if (secureFilePattern.test(fileName)) {
+        falsePositives.push(finding);
+      } else if (vulnerableFilePattern.test(fileName)) {
+        truePositives.push(finding);
+      } else {
+        unknownFiles.push(finding);
       }
-      findingsByLanguage[language].push(finding);
+
+      if (!findingsByLanguage[language]) {
+        findingsByLanguage[language] = {
+          total: [],
+          truePositives: [],
+          falsePositives: [],
+          unknown: []
+        };
+      }
+      findingsByLanguage[language].total.push(finding);
+      
+      if (secureFilePattern.test(fileName)) {
+        findingsByLanguage[language].falsePositives.push(finding);
+      } else if (vulnerableFilePattern.test(fileName)) {
+        findingsByLanguage[language].truePositives.push(finding);
+      } else {
+        findingsByLanguage[language].unknown.push(finding);
+      }
 
       // Group by category
       const category = finding.category || 'unknown';
       if (!findingsByCategory[category]) {
-        findingsByCategory[category] = [];
+        findingsByCategory[category] = {
+          total: [],
+          truePositives: [],
+          falsePositives: []
+        };
       }
-      findingsByCategory[category].push(finding);
+      findingsByCategory[category].total.push(finding);
+      
+      if (secureFilePattern.test(fileName)) {
+        findingsByCategory[category].falsePositives.push(finding);
+      } else if (vulnerableFilePattern.test(fileName)) {
+        findingsByCategory[category].truePositives.push(finding);
+      }
     });
+
+    // Calculate false positive rate
+    const totalFindings = results.findings.length;
+    const fpCount = falsePositives.length;
+    const tpCount = truePositives.length;
+    const falsePositiveRate = totalFindings > 0 ? ((fpCount / totalFindings) * 100).toFixed(2) : '0.00';
+    const truePositiveRate = totalFindings > 0 ? ((tpCount / totalFindings) * 100).toFixed(2) : '0.00';
+
+    // Display false positive analysis
+    console.log('\n' + '='.repeat(60));
+    console.log('📊 FALSE POSITIVE ANALYSIS');
+    console.log('='.repeat(60));
+    console.log(`Total Findings: ${totalFindings}`);
+    console.log(`✅ True Positives (vulnerable files): ${tpCount} (${truePositiveRate}%)`);
+    console.log(`❌ False Positives (secure files): ${fpCount} (${falsePositiveRate}%)`);
+    console.log(`❓ Unknown/Other files: ${unknownFiles.length}`);
+    
+    if (fpCount > 0) {
+      console.log('\n⚠️  FALSE POSITIVES DETECTED:');
+      falsePositives.slice(0, 10).forEach((fp, index) => {
+        console.log(`\n  ${index + 1}. [${fp.severity.toUpperCase()}] ${fp.category}`);
+        console.log(`     File: ${fp.filePath}`);
+        console.log(`     Line: ${fp.lineNumber}`);
+        console.log(`     Message: ${fp.message}`);
+      });
+      if (fpCount > 10) {
+        console.log(`\n  ... and ${fpCount - 10} more false positives`);
+      }
+    } else {
+      console.log('\n✅ No false positives detected!');
+    }
 
     // Display findings by language
     console.log('\n' + '='.repeat(60));
@@ -105,15 +177,20 @@ async function runTests() {
     Object.keys(findingsByLanguage)
       .sort()
       .forEach((lang) => {
-        const count = findingsByLanguage[lang].length;
+        const langData = findingsByLanguage[lang];
+        const total = langData.total.length;
+        const tp = langData.truePositives.length;
+        const fp = langData.falsePositives.length;
+        const unknown = langData.unknown.length;
+        
         const severities = {
-          critical: findingsByLanguage[lang].filter((f) => f.severity === 'critical').length,
-          high: findingsByLanguage[lang].filter((f) => f.severity === 'high').length,
-          medium: findingsByLanguage[lang].filter((f) => f.severity === 'medium').length,
-          low: findingsByLanguage[lang].filter((f) => f.severity === 'low').length,
+          critical: langData.total.filter((f) => f.severity === 'critical').length,
+          high: langData.total.filter((f) => f.severity === 'high').length,
+          medium: langData.total.filter((f) => f.severity === 'medium').length,
+          low: langData.total.filter((f) => f.severity === 'low').length,
         };
         console.log(`\n${lang.toUpperCase()}:`);
-        console.log(`  Total: ${count}`);
+        console.log(`  Total: ${total} (✅ TP: ${tp}, ❌ FP: ${fp}, ❓ Unknown: ${unknown})`);
         console.log(`  Critical: ${severities.critical}, High: ${severities.high}, Medium: ${severities.medium}, Low: ${severities.low}`);
       });
 
@@ -124,8 +201,12 @@ async function runTests() {
     Object.keys(findingsByCategory)
       .sort()
       .forEach((category) => {
-        const count = findingsByCategory[category].length;
-        console.log(`\n${category}: ${count} findings`);
+        const catData = findingsByCategory[category];
+        const total = catData.total.length;
+        const tp = catData.truePositives.length;
+        const fp = catData.falsePositives.length;
+        const fpRate = total > 0 ? ((fp / total) * 100).toFixed(1) : '0.0';
+        console.log(`\n${category}: ${total} findings (✅ TP: ${tp}, ❌ FP: ${fp} [${fpRate}%])`);
       });
 
     // Display sample findings
@@ -177,6 +258,18 @@ async function runTests() {
       console.log('✅ Scanner detected vulnerabilities');
     } else {
       console.log('⚠️  No vulnerabilities detected - may need rule configuration');
+    }
+
+    // False positive rate validation
+    const fpRate = parseFloat(falsePositiveRate);
+    if (fpRate === 0) {
+      console.log('✅ Perfect! Zero false positives detected');
+    } else if (fpRate < 5) {
+      console.log(`✅ Excellent! Low false positive rate: ${fpRate}%`);
+    } else if (fpRate < 10) {
+      console.log(`⚠️  Acceptable false positive rate: ${fpRate}%`);
+    } else {
+      console.log(`❌ High false positive rate: ${fpRate}% - needs improvement`);
     }
 
     // Expected vulnerability types
